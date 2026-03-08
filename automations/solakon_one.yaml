@@ -9,8 +9,10 @@ triggers:
   - trigger: state
     entity_id: sensor.solakon_one_battery_soc
 trigger_variables:
-  # max house grit feed-in power
-  max_active_power: 800
+  # max power with EPS load (external socket, e.g. car charging)
+  max_active_power: 1200
+  # max house grid feed-in power (German legal limit)
+  max_house_feed: 800
   # max power when charging from the grid
   max_grid_charge: 600
   max_remote_timeout: 60
@@ -325,7 +327,11 @@ actions:
           - variables:
               charge_mode: "{{ states('input_select.solakon_one_charge_mode') }}"
               discharge_current: "{{ 40 if charge_mode == 'power_boost' else 0 }}"
-              new_active_power: "{{ min(max_active_power, max(0, current_demand - min_net_power)) }}"
+              effective_max: >
+                {{ max_active_power
+                   if states('sensor.solakon_one_eps_power') | int(0) > max_house_feed
+                   else max_house_feed }}
+              new_active_power: "{{ min(effective_max, max(0, current_demand - min_net_power)) }}"
           # ensure PV-priority charge mode (set only if necessary)
           - choose:
               - conditions:
