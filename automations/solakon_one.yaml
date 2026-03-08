@@ -1,6 +1,7 @@
 alias: Solakon One Steuerung
 description: Solakon One Steuerung
-mode: restart
+mode: queued
+max: 5
 triggers:
   - trigger: state
     entity_id: sensor.energie_aktueller_verbrauch_statistik
