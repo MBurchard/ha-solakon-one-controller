@@ -27,24 +27,28 @@ blueprint:
     timeout_sensor:
       name: Remote Timeout Sensor
       description: Solakon One remote timeout countdown sensor
+      default: sensor.solakon_one_remote_timeout_countdown
       selector:
         entity:
           domain: sensor
     soc_sensor:
       name: Battery SOC Sensor
       description: Solakon One battery state of charge sensor (%)
+      default: sensor.solakon_one_battery_soc
       selector:
         entity:
           domain: sensor
     pv_power_sensor:
       name: PV Power Sensor
       description: Solakon One total PV power sensor (W)
+      default: sensor.solakon_one_total_pv_power
       selector:
         entity:
           domain: sensor
     eps_power_sensor:
       name: EPS Power Sensor
       description: Solakon One EPS power sensor for external socket (W)
+      default: sensor.solakon_one_eps_power
       selector:
         entity:
           domain: sensor
@@ -61,24 +65,28 @@ blueprint:
     remote_control_mode:
       name: Remote Control Mode
       description: Solakon One remote control mode select entity
+      default: select.solakon_one_remote_control_mode
       selector:
         entity:
           domain: select
     remote_active_power:
       name: Remote Active Power
       description: Solakon One remote active power number entity (W)
+      default: number.solakon_one_remote_active_power
       selector:
         entity:
           domain: number
     discharge_current_entity:
       name: Max Discharge Current Entity
       description: Solakon One battery max discharge current number entity (A)
+      default: number.solakon_one_battery_max_discharge_current
       selector:
         entity:
           domain: number
     remote_timeout_set:
       name: Remote Timeout Set
       description: Solakon One remote timeout set number entity
+      default: number.solakon_one_remote_timeout_set
       selector:
         entity:
           domain: number
