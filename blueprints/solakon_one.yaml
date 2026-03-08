@@ -1,5 +1,6 @@
 blueprint:
   name: Solakon One Charge Controller
+  source_url: https://github.com/MBurchard/ha-solakon-one-controller/blob/main/blueprints/solakon_one.yaml
   spec_version: 1
   description: >
     Automated charge controller for Solakon One balcony power station with battery storage. Manages five charge modes
