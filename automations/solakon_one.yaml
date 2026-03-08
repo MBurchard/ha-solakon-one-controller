@@ -1,0 +1,315 @@
+alias: Solakon One Steuerung
+description: Solakon One Steuerung
+mode: restart
+triggers:
+  - trigger: state
+    entity_id: sensor.energie_aktueller_verbrauch_statistik
+  - trigger: state
+    entity_id: sensor.solakon_one_remote_timeout_countdown
+  - trigger: state
+    entity_id: sensor.solakon_one_battery_soc
+trigger_variables:
+  # max house grit feed-in power
+  max_active_power: 800
+  # max power when charging from grid
+  max_grid_charge: 600
+  max_remote_timeout: 60
+  # min value we want to consume from grid
+  min_net_power: 5
+  # below this value the Solakon One seems to have wrong data, there is not enough power to charge battery or house feed-in
+  min_pv_charge_power: 40
+  # absolute minimum value of SOC, start charging with any available power to get back to a healthy level
+  min_soc: 10
+  # minimum value of SOC to be kept if PV available, no house feed-in below that value
+  min_soc_pv_charge: 20
+  min_soc_power_boost_off: 21
+  min_soc_power_boost: 70
+variables:
+  current_demand: "{{ states('sensor.energie_aktueller_verbrauch_statistik') | int(0) }}"
+  current_pv: "{{ states('sensor.solakon_one_total_pv_power') | int(0) }}"
+  current_soc: "{{ states('sensor.solakon_one_battery_soc') | int(0) }}"
+  current_timeout: "{{ states('sensor.solakon_one_remote_timeout_countdown') | int(0) }}"
+conditions: [ ]
+actions:
+  # abort if SOC is not available (unknown / unavailable / none)
+  - condition: template
+    value_template: "{{ states('sensor.solakon_one_battery_soc') not in ['unknown', 'unavailable', 'none'] }}"
+
+  - choose:
+      # active CHARGE mode with grid energy if SOC is below minimum
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ current_soc < min_soc
+                 and states('input_select.solakon_one_charge_mode') != 'safety_charge' }}
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.solakon_one_charge_mode
+            data:
+              option: safety_charge
+          - event: custom_log
+            event_data:
+              level: debug
+              channel: solakon
+              message: "SOC < {{ min_soc }}% -> (Grid) charge mode enabled"
+
+  - choose:
+      # use PV to charge the battery without exporting to the home grid
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ current_soc >= min_soc + 5
+                 and current_soc < min_soc_pv_charge
+                 and states('input_select.solakon_one_charge_mode') != 'pv_protect' }}
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.solakon_one_charge_mode
+            data:
+              option: pv_protect
+          - event: custom_log
+            event_data:
+              level: debug
+              channel: solakon
+              message: "SOC between {{ min_soc + 5 }}% and {{ min_soc_pv_charge }}% -> PV protect mode enabled"
+
+  - choose:
+      # exporting PV into the home grid
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ current_soc > min_soc_pv_charge
+                 and states('input_select.solakon_one_charge_mode') != 'eco_feed'
+                 and states('input_select.solakon_one_charge_mode') != 'power_boost' }}
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.solakon_one_charge_mode
+            data:
+              option: eco_feed
+          - event: custom_log
+            event_data:
+              level: debug
+              channel: solakon
+              message: "SOC > {{ min_soc_pv_charge }}% -> ECO feed mode enabled"
+
+  - choose:
+      # exporting PV into the home grid
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ current_soc > min_soc_power_boost
+                 and states('input_select.solakon_one_charge_mode') != 'power_boost' }}
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.solakon_one_charge_mode
+            data:
+              option: power_boost
+          - event: custom_log
+            event_data:
+              level: debug
+              channel: solakon
+              message: "SOC > {{ min_soc_power_boost }}% -> Power Boost mode enabled"
+
+  - choose:
+      # disabling Power Boost
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ current_soc < min_soc_power_boost_off
+                 and states('input_select.solakon_one_charge_mode') == 'power_boost' }}
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.solakon_one_charge_mode
+            data:
+              option: eco_feed
+          - event: custom_log
+            event_data:
+              level: debug
+              channel: solakon
+              message: "SOC < {{ min_soc_power_boost_off }}% -> Power Boost mode disabled"
+
+  - choose:
+      # set remote timer if necessary
+      - conditions:
+          - condition: template
+            value_template: "{{ current_timeout < (max_remote_timeout / 2) }}"
+        sequence:
+          - action: number.set_value
+            target:
+              entity_id: number.solakon_one_remote_timeout_set
+            data:
+              value: "{{ max_remote_timeout }}"
+          - event: custom_log
+            event_data:
+              level: debug
+              channel: solakon
+              message: "set timeout -> {{ max_remote_timeout }}"
+
+  - choose:
+      # configure Solakon One for safety_charge mode
+      - conditions:
+          - condition: template
+            value_template: "{{ states('input_select.solakon_one_charge_mode') == 'safety_charge' }}"
+        sequence:
+          # ensure PV-priority charge mode (set only if necessary)
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ states('select.solakon_one_remote_control_mode') != '3' }}"
+                sequence:
+                  - action: select.select_option
+                    target:
+                      entity_id: select.solakon_one_remote_control_mode
+                    data:
+                      option: '3'
+
+          # ensure no discharge (set only if necessary)
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ states('number.solakon_one_battery_max_discharge_current') | float(0) != 0 }}"
+                sequence:
+                  - action: number.set_value
+                    target:
+                      entity_id: number.solakon_one_battery_max_discharge_current
+                    data:
+                      value: 0
+
+          # decide grid usage based on PV power
+          - choose:
+              # PV sufficient -> no grid power
+              - conditions:
+                  - condition: template
+                    value_template: "{{ current_pv > min_pv_charge_power }}"
+                sequence:
+                  - condition: template
+                    value_template: "{{ states('number.solakon_one_remote_active_power') | int(0) != 0 }}"
+                  - action: number.set_value
+                    target:
+                      entity_id: number.solakon_one_remote_active_power
+                    data:
+                      value: 0
+                  - event: custom_log
+                    event_data:
+                      level: debug
+                      channel: solakon
+                      message: "safety_charge: PV {{ current_pv }} W -> grid 0 W"
+
+              # PV not sufficient -> use grid assist
+              - conditions:
+                  - condition: template
+                    value_template: "{{ current_pv <= min_pv_charge_power }}"
+                sequence:
+                  - condition: template
+                    value_template: "{{ states('number.solakon_one_remote_active_power') | int(0) != max_grid_charge }}"
+                  - action: number.set_value
+                    target:
+                      entity_id: number.solakon_one_remote_active_power
+                    data:
+                      value: "{{ max_grid_charge }}"
+                  - event: custom_log
+                    event_data:
+                      level: debug
+                      channel: solakon
+                      message: "safety_charge: PV {{ current_pv }} W -> grid {{ max_grid_charge }} W"
+
+  - choose:
+      # configure Solakon One for pv_protect mode
+      - conditions:
+          - condition: template
+            value_template: "{{ states('input_select.solakon_one_charge_mode') == 'pv_protect' }}"
+        sequence:
+          # ensure PV-priority charge mode (set only if necessary)
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ states('select.solakon_one_remote_control_mode') != '3' }}"
+                sequence:
+                  - action: select.select_option
+                    target:
+                      entity_id: select.solakon_one_remote_control_mode
+                    data:
+                      option: '3'
+
+          # ensure no discharge (set only if necessary)
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ states('number.solakon_one_battery_max_discharge_current') | float(0) != 0 }}"
+                sequence:
+                  - action: number.set_value
+                    target:
+                      entity_id: number.solakon_one_battery_max_discharge_current
+                    data:
+                      value: 0
+
+          # ensure no grid usage (set only if necessary)
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ states('number.solakon_one_remote_active_power') | int(0) != 0 }}"
+                sequence:
+                  - action: number.set_value
+                    target:
+                      entity_id: number.solakon_one_remote_active_power
+                    data:
+                      value: 0
+                  - event: custom_log
+                    event_data:
+                      level: debug
+                      channel: solakon
+                      message: "pv_protect: PV {{ current_pv }} W -> grid 0 W"
+
+  - choose:
+      # configure Solakon One for eco_feed and power_boost mode
+      - conditions:
+          - condition: template
+            value_template: "{{ states('input_select.solakon_one_charge_mode') in ['eco_feed', 'power_boost'] }}"
+        sequence:
+          - variables:
+              charge_mode: "{{ states('input_select.solakon_one_charge_mode') }}"
+              discharge_current: "{{ 40 if charge_mode == 'power_boost' else 0 }}"
+              new_active_power: "{{ min(max_active_power, max(0, current_demand - min_net_power)) }}"
+          # ensure PV-priority charge mode (set only if necessary)
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ states('select.solakon_one_remote_control_mode') != '1' }}"
+                sequence:
+                  - action: select.select_option
+                    target:
+                      entity_id: select.solakon_one_remote_control_mode
+                    data:
+                      option: '1'
+
+          # ensure max discharge (set only if necessary)
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ states('number.solakon_one_battery_max_discharge_current') | float(0) != discharge_current }}"
+                sequence:
+                  - action: number.set_value
+                    target:
+                      entity_id: number.solakon_one_battery_max_discharge_current
+                    data:
+                      value: "{{ discharge_current }}"
+
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ states('number.solakon_one_remote_active_power') | int(0) != new_active_power }}"
+                sequence:
+                  - action: number.set_value
+                    target:
+                      entity_id: number.solakon_one_remote_active_power
+                    data:
+                      value: "{{ new_active_power }}"
+                  - event: custom_log
+                    event_data:
+                      level: debug
+                      channel: solakon
+                      message: "{{ charge_mode }}: demand {{ current_demand }} W -> remote_active_power {{ new_active_power }} W"
