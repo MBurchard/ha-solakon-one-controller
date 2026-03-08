@@ -11,7 +11,7 @@ triggers:
 trigger_variables:
   # max house grit feed-in power
   max_active_power: 800
-  # max power when charging from grid
+  # max power when charging from the grid
   max_grid_charge: 600
   max_remote_timeout: 60
   # min value we want to consume from grid
@@ -34,8 +34,61 @@ actions:
   - condition: template
     value_template: "{{ states('sensor.solakon_one_battery_soc') not in ['unknown', 'unavailable', 'none'] }}"
 
+  # disabled mode: reset hardware to defaults and stop
   - choose:
-      # active CHARGE mode with grid energy if SOC is below minimum
+      - conditions:
+          - condition: template
+            value_template: "{{ states('input_select.solakon_one_charge_mode') == 'disabled' }}"
+        sequence:
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ states('select.solakon_one_remote_control_mode') != '0' }}"
+                sequence:
+                  - action: select.select_option
+                    target:
+                      entity_id: select.solakon_one_remote_control_mode
+                    data:
+                      option: '0'
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ states('number.solakon_one_remote_active_power') | int(0) != 0 }}"
+                sequence:
+                  - action: number.set_value
+                    target:
+                      entity_id: number.solakon_one_remote_active_power
+                    data:
+                      value: 0
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ states('number.solakon_one_battery_max_discharge_current') | float(0) != 40 }}"
+                sequence:
+                  - action: number.set_value
+                    target:
+                      entity_id: number.solakon_one_battery_max_discharge_current
+                    data:
+                      value: 40
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ states('number.solakon_one_remote_timeout_set') | int(0) != 0 }}"
+                sequence:
+                  - action: number.set_value
+                    target:
+                      entity_id: number.solakon_one_remote_timeout_set
+                    data:
+                      value: 0
+          - event: custom_log
+            event_data:
+              level: debug
+              channel: solakon
+              message: "Disabled mode: hardware reset to defaults"
+          - stop: "Disabled mode active"
+
+  - choose:
+      # active CHARGE mode with grid energy if SOC is below the minimum
       - conditions:
           - condition: template
             value_template: >
