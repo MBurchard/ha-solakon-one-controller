@@ -20,9 +20,8 @@ trigger_variables:
   min_pv_charge_power: 40
   # absolute minimum value of SOC, start charging with any available power to get back to a healthy level
   min_soc: 10
-  # minimum value of SOC to be kept if PV available, no house feed-in below that value
-  min_soc_pv_charge: 20
-  min_soc_power_boost_off: 21
+  # minimum SOC for house feed-in, below this value battery is protected
+  min_soc_feed: 20
   min_soc_power_boost: 70
 variables:
   current_demand: "{{ states('sensor.energie_aktueller_verbrauch_statistik') | int(0) }}"
@@ -59,9 +58,11 @@ actions:
       - conditions:
           - condition: template
             value_template: >
-              {{ current_soc >= min_soc + 5
-                 and current_soc < min_soc_pv_charge
-                 and states('input_select.solakon_one_charge_mode') != 'pv_protect' }}
+              {{ current_soc >= min_soc
+                 and current_soc < min_soc_feed
+                 and states('input_select.solakon_one_charge_mode') != 'pv_protect'
+                 and (states('input_select.solakon_one_charge_mode') != 'safety_charge'
+                      or current_soc >= min_soc + 5) }}
         sequence:
           - action: input_select.select_option
             target:
@@ -72,30 +73,10 @@ actions:
             event_data:
               level: debug
               channel: solakon
-              message: "SOC between {{ min_soc + 5 }}% and {{ min_soc_pv_charge }}% -> PV protect mode enabled"
+              message: "SOC between {{ min_soc }}% and {{ min_soc_feed }}% -> PV protect mode enabled"
 
   - choose:
-      # exporting PV into the home grid
-      - conditions:
-          - condition: template
-            value_template: >
-              {{ current_soc > min_soc_pv_charge
-                 and states('input_select.solakon_one_charge_mode') != 'eco_feed'
-                 and states('input_select.solakon_one_charge_mode') != 'power_boost' }}
-        sequence:
-          - action: input_select.select_option
-            target:
-              entity_id: input_select.solakon_one_charge_mode
-            data:
-              option: eco_feed
-          - event: custom_log
-            event_data:
-              level: debug
-              channel: solakon
-              message: "SOC > {{ min_soc_pv_charge }}% -> ECO feed mode enabled"
-
-  - choose:
-      # exporting PV into the home grid
+      # auto-enable power_boost at high SOC
       - conditions:
           - condition: template
             value_template: >
@@ -112,13 +93,31 @@ actions:
               level: debug
               channel: solakon
               message: "SOC > {{ min_soc_power_boost }}% -> Power Boost mode enabled"
+      # eco_feed as default above min_soc_feed
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ current_soc > min_soc_feed
+                 and states('input_select.solakon_one_charge_mode') != 'eco_feed'
+                 and states('input_select.solakon_one_charge_mode') != 'power_boost' }}
+        sequence:
+          - action: input_select.select_option
+            target:
+              entity_id: input_select.solakon_one_charge_mode
+            data:
+              option: eco_feed
+          - event: custom_log
+            event_data:
+              level: debug
+              channel: solakon
+              message: "SOC > {{ min_soc_feed }}% -> ECO feed mode enabled"
 
   - choose:
       # disabling Power Boost
       - conditions:
           - condition: template
             value_template: >
-              {{ current_soc < min_soc_power_boost_off
+              {{ current_soc <= min_soc_feed
                  and states('input_select.solakon_one_charge_mode') == 'power_boost' }}
         sequence:
           - action: input_select.select_option
@@ -130,10 +129,10 @@ actions:
             event_data:
               level: debug
               channel: solakon
-              message: "SOC < {{ min_soc_power_boost_off }}% -> Power Boost mode disabled"
+              message: "SOC <= {{ min_soc_feed }}% -> Power Boost mode disabled"
 
   - choose:
-      # set remote timer if necessary
+      # set a remote timer if necessary
       - conditions:
           - condition: template
             value_template: "{{ current_timeout < (max_remote_timeout / 2) }}"
