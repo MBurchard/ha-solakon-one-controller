@@ -1,4 +1,4 @@
-# Solakon One Charge Controller [v002]
+# Solakon One Charge Controller [v003]
 
 Home Assistant blueprint for automated charge control of the Solakon One balcony power station with battery storage.
 
@@ -18,6 +18,16 @@ Home Assistant blueprint for automated charge control of the Solakon One balcony
 | pv_protect    | SOC >= 10% (or >= 15% from safety_charge) | PV-only charging, no discharge, no feed-in               |
 | eco_feed      | SOC > 20%                                 | PV feed-in to house, demand-based, no discharge          |
 | power_boost   | SOC > 70% (auto) or manual from >= 20%    | Like eco_feed with battery discharge                     |
+
+## Solar Overflow Protection
+
+When the battery is nearly full (SOC >= 98%), the sun keeps shining and PV production is available at no cost.
+Rather than letting this energy go unused, the controller automatically switches to overflow mode: battery discharge
+is set to 0 A, and feed-in power is set to the maximum house feed limit (default 800 W), keeping PV production active
+and feeding it into the house grid.
+
+Overflow mode stays active until SOC drops to 95% or below, providing a 3% hysteresis buffer to prevent oscillation.
+This works automatically in both eco_feed and power_boost modes and requires no configuration.
 
 ## Prerequisites
 

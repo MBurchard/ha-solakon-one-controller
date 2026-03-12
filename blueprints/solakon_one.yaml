@@ -1,10 +1,11 @@
 blueprint:
-  name: Solakon One Charge Controller [v002]
+  name: Solakon One Charge Controller [v003]
   source_url: https://github.com/MBurchard/ha-solakon-one-controller/blob/main/blueprints/solakon_one.yaml
   description: >
     Automated charge controller for Solakon One balcony power station with battery storage. Manages five charge modes
     (disabled, safety_charge, pv_protect, eco_feed, power_boost) based on battery SOC, PV production, and household
-    energy demand.
+    energy demand. Includes solar overflow protection: when the battery is full, the controller keeps harvesting
+    available solar energy and feeds it into the grid instead of letting free PV production go unused.
 
 
     Prerequisites (must be created manually before using this blueprint):
@@ -550,12 +551,29 @@ actions:
         sequence:
           - variables:
               charge_mode: "{{ states(charge_mode_entity) }}"
-              discharge_current: "{{ max_discharge if charge_mode == 'power_boost' else 0 }}"
+              is_overflow: >
+                {{ current_soc >= 98
+                   or (current_soc > 95
+                       and states(discharge_entity) | float(0) == 0
+                       and states(active_power_entity) | int(0) == max_house_feed) }}
+              discharge_current: >
+                {% if is_overflow %}
+                  0
+                {% elif charge_mode == 'power_boost' %}
+                  {{ max_discharge }}
+                {% else %}
+                  0
+                {% endif %}
               effective_max: >
                 {{ max_active_power
                    if states(eps_power_sensor) | int(0) > max_house_feed
                    else max_house_feed }}
-              new_active_power: "{{ min(effective_max, max(0, current_demand - min_net_power)) }}"
+              new_active_power: >
+                {% if is_overflow %}
+                  {{ max_house_feed }}
+                {% else %}
+                  {{ min(effective_max, max(0, current_demand - min_net_power)) }}
+                {% endif %}
           # ensure PV-priority charge mode (set only if necessary)
           - choose:
               - conditions:
@@ -594,4 +612,9 @@ actions:
                     event_data:
                       level: debug
                       channel: solakon
-                      message: "{{ charge_mode }}: demand {{ current_demand }} W -> remote_active_power {{ new_active_power }} W"
+                      message: >
+                        {% if is_overflow %}
+                          {{ charge_mode }}: overflow (SOC {{ current_soc }}%) -> feed {{ new_active_power }} W
+                        {% else %}
+                          {{ charge_mode }}: demand {{ current_demand }} W -> remote_active_power {{ new_active_power }} W
+                        {% endif %}
