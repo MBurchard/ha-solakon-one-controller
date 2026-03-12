@@ -1,5 +1,5 @@
 blueprint:
-  name: Solakon One Charge Controller [v003]
+  name: Solakon One Charge Controller [v004]
   source_url: https://github.com/MBurchard/ha-solakon-one-controller/blob/main/blueprints/solakon_one.yaml
   description: >
     Automated charge controller for Solakon One balcony power station with battery storage. Manages five charge modes
@@ -238,9 +238,9 @@ triggers:
   - trigger: state
     entity_id: !input demand_sensor
   - trigger: state
-    entity_id: !input timeout_sensor
-  - trigger: state
     entity_id: !input soc_sensor
+  - trigger: time_pattern
+    seconds: "/30"
 
 variables:
   current_demand: "{{ states(demand_sensor) | int(0) }}"
