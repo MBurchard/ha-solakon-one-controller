@@ -1,5 +1,5 @@
 blueprint:
-  name: Solakon One Charge Controller [v004]
+  name: Solakon One Charge Controller [v005]
   source_url: https://github.com/MBurchard/ha-solakon-one-controller/blob/main/blueprints/solakon_one.yaml
   description: >
     Automated charge controller for Solakon One balcony power station with battery storage. Manages five charge modes
@@ -551,15 +551,9 @@ actions:
         sequence:
           - variables:
               charge_mode: "{{ states(charge_mode_entity) }}"
-              is_overflow: >
-                {{ current_soc >= 98
-                   or (current_soc > 95
-                       and states(discharge_entity) | float(0) == 0
-                       and states(active_power_entity) | int(0) == max_house_feed) }}
+              is_overflow: "{{ current_soc >= 98 }}"
               discharge_current: >
-                {% if is_overflow %}
-                  0
-                {% elif charge_mode == 'power_boost' %}
+                {% if charge_mode == 'power_boost' %}
                   {{ max_discharge }}
                 {% else %}
                   0
@@ -570,7 +564,7 @@ actions:
                    else max_house_feed }}
               new_active_power: >
                 {% if is_overflow %}
-                  {{ max_house_feed }}
+                  {{ min(effective_max, max(current_pv, current_demand - min_net_power, 0)) }}
                 {% else %}
                   {{ min(effective_max, max(0, current_demand - min_net_power)) }}
                 {% endif %}

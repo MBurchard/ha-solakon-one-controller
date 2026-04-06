@@ -1,4 +1,4 @@
-# Solakon One Charge Controller [v004]
+# Solakon One Charge Controller [v005]
 
 Home Assistant blueprint for automated charge control of the Solakon One balcony power station with battery storage.
 
