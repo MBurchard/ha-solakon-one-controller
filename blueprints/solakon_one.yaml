@@ -1,6 +1,6 @@
 #file: noinspection YAMLSchemaValidation
 blueprint:
-  name: Solakon One Charge Controller [v006]
+  name: Solakon One Charge Controller [v007]
   source_url: https://github.com/MBurchard/ha-solakon-one-controller/blob/main/blueprints/solakon_one.yaml
   description: >
     Automated charge controller for Solakon One balcony power station with battery storage. Manages five charge modes
@@ -106,6 +106,14 @@ blueprint:
       default: "1"
       selector:
         text:
+    rc_mode_grid_export:
+      name: RC Mode Grid Export
+      description: >
+        Remote control mode used in overflow (battery near full). Value 5 means "grid export" and bypasses the PV
+        curtailment that the inverter triggers in PV-priority export modes when the battery is near full.
+      default: "5"
+      selector:
+        text:
     rc_mode_charge:
       name: RC Mode Charge
       description: Remote control mode value for PV priority charging (safety_charge/pv_protect)
@@ -161,9 +169,8 @@ blueprint:
     inverter_self_consumption:
       name: Inverter Self-Consumption (W)
       description: >
-        Idle power draw of the inverter. Same value doubles as the PV floor below which charging
-        is not worthwhile (net PV output is effectively zero) and as the overhead deducted in
-        overflow mode so the inverter feeds its own consumption from PV instead of the battery.
+        Idle power draw of the inverter. Used as the PV floor in safety_charge: if PV is below  this value, net PV
+        output is effectively zero and grid assist kicks in instead.
       default: 40
       selector:
         number:
@@ -225,6 +232,7 @@ trigger_variables:
   # remote control mode values
   rc_mode_off: !input rc_mode_off
   rc_mode_feed: !input rc_mode_feed
+  rc_mode_grid_export: !input rc_mode_grid_export
   rc_mode_charge: !input rc_mode_charge
   # numeric settings
   max_active_power: !input max_active_power
@@ -536,50 +544,55 @@ actions:
     then:
       - variables:
           charge_mode: "{{ states(charge_mode_entity) }}"
-          # Overflow hysteresis: enter hard at SOC >= 98, exit once SOC drops below 95. Between
-          # those, the current active_power is the state anchor: we stay in overflow only while
-          # we are still feeding significantly above pure household demand (the +inverter_
-          # self_consumption offset distinguishes real PV overshoot from demand-following).
-          # Note: current_soc goes through `| int(0)`, so thresholds effectively round down.
+          # Overflow only makes sense while PV actually exceeds household demand (plus inverter self-consumption).
+          # If PV drops below that, the battery must supply the household, so discharge has to be enabled, and we fall
+          # back to normal demand-based feed-in.
+          # SOC part: hysteresis with hard enter at SOC >= 98, stay while SOC >= 96.
+          # Hold branch uses active_power as a state anchor (only the overflow branch sets it to max_house_feed).
+          # Note: current_soc is int-floored.
           is_overflow: >
-            {{ current_soc >= 98
-               or (current_soc > 95
-                   and states(active_power_entity) | int(0)
-                       > (current_demand - min_net_power) + inverter_self_consumption) }}
+            {{ (current_soc >= 98
+                or (current_soc >= 96 and current_soc < 98
+                    and states(active_power_entity) | int(0) >= max_house_feed))
+               and current_pv > (current_demand - min_net_power + inverter_self_consumption) }}
+          # In overflow, lock discharge to 0 so the battery cannot drain and switch the RC mode to grid export so the
+          # inverter does not curtail PV when the battery is near full.
+          # Outside overflow, keep the normal power_boost/eco_feed behaviour.
           discharge_current: >
-            {% if charge_mode == 'power_boost' %}
+            {% if is_overflow %}
+              0
+            {% elif charge_mode == 'power_boost' %}
               {{ max_discharge }}
             {% else %}
               0
             {% endif %}
+          target_rc_mode: >
+            {{ rc_mode_grid_export if is_overflow else rc_mode_feed }}
           effective_max: >
             {{ max_active_power
                if states(eps_power_sensor) | int(0) > max_house_feed
                else max_house_feed }}
-          # In overflow mode, PV minus inverter self-consumption sets the floor so the inverter
-          # covers its own draw from PV instead of draining the battery. The battery is still
-          # available as a short-term buffer (discharge stays at 40A for power_boost), which
-          # keeps the inverter from throttling PV production when SOC is near full.
+          # In the overflow feed a fixed max_house_feed (legal limit). With discharge=0 and the grid-export RC mode,
+          # the inverter will supply as much as PV currently allows and not throttle.
+          # Outside overflow, stick to demand-based feed-in as before.
           new_active_power: >
             {% if is_overflow %}
-              {{ min(effective_max,
-                     max(current_pv - inverter_self_consumption,
-                         current_demand - min_net_power, 0)) }}
+              {{ max_house_feed }}
             {% else %}
               {{ min(effective_max, max(0, current_demand - min_net_power)) }}
             {% endif %}
-      # ensure PV-priority charge mode (set only if necessary)
+      # ensure correct RC mode (grid_export in overflow, feed otherwise)
       - if:
           - condition: template
-            value_template: "{{ states(rc_mode_entity) != rc_mode_feed }}"
+            value_template: "{{ states(rc_mode_entity) != target_rc_mode }}"
         then:
           - action: select.select_option
             target:
               entity_id: !input remote_control_mode
             data:
-              option: "{{ rc_mode_feed }}"
+              option: "{{ target_rc_mode }}"
 
-      # ensure max discharge (set only if necessary)
+      # ensure discharge current matches target (set only if necessary)
       - if:
           - condition: template
             value_template: "{{ states(discharge_entity) | float(0) != discharge_current }}"
