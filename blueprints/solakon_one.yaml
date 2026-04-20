@@ -1,5 +1,6 @@
+#file: noinspection YAMLSchemaValidation
 blueprint:
-  name: Solakon One Charge Controller [v005]
+  name: Solakon One Charge Controller [v006]
   source_url: https://github.com/MBurchard/ha-solakon-one-controller/blob/main/blueprints/solakon_one.yaml
   description: >
     Automated charge controller for Solakon One balcony power station with battery storage. Manages five charge modes
@@ -157,9 +158,12 @@ blueprint:
           min: 0
           max: 100
           unit_of_measurement: W
-    min_pv_charge_power:
-      name: Min PV Charge Power (W)
-      description: Minimum PV power for meaningful charging
+    inverter_self_consumption:
+      name: Inverter Self-Consumption (W)
+      description: >
+        Idle power draw of the inverter. Same value doubles as the PV floor below which charging
+        is not worthwhile (net PV output is effectively zero) and as the overhead deducted in
+        overflow mode so the inverter feeds its own consumption from PV instead of the battery.
       default: 40
       selector:
         number:
@@ -228,7 +232,7 @@ trigger_variables:
   max_grid_charge: !input max_grid_charge
   max_remote_timeout: !input max_remote_timeout
   min_net_power: !input min_net_power
-  min_pv_charge_power: !input min_pv_charge_power
+  inverter_self_consumption: !input inverter_self_consumption
   min_soc: !input min_soc
   min_soc_feed: !input min_soc_feed
   min_soc_power_boost: !input min_soc_power_boost
@@ -248,108 +252,99 @@ variables:
   current_soc: "{{ states(soc_sensor) | int(0) }}"
   current_timeout: "{{ states(timeout_sensor) | int(0) }}"
 
-conditions: []
-
 actions:
   # abort if SOC is not available (unknown / unavailable / none)
   - condition: template
     value_template: "{{ states(soc_sensor) not in ['unknown', 'unavailable', 'none'] }}"
 
   # disabled mode: reset hardware to defaults and stop
-  - choose:
-      - conditions:
+  - if:
+      - condition: template
+        value_template: "{{ states(charge_mode_entity) == 'disabled' }}"
+    then:
+      - if:
           - condition: template
-            value_template: "{{ states(charge_mode_entity) == 'disabled' }}"
-        sequence:
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: "{{ states(rc_mode_entity) != rc_mode_off }}"
-                sequence:
-                  - action: select.select_option
-                    target:
-                      entity_id: !input remote_control_mode
-                    data:
-                      option: "{{ rc_mode_off }}"
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: "{{ states(active_power_entity) | int(0) != 0 }}"
-                sequence:
-                  - action: number.set_value
-                    target:
-                      entity_id: !input remote_active_power
-                    data:
-                      value: 0
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: "{{ states(discharge_entity) | float(0) != max_discharge }}"
-                sequence:
-                  - action: number.set_value
-                    target:
-                      entity_id: !input discharge_current_entity
-                    data:
-                      value: "{{ max_discharge }}"
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: "{{ states(timeout_set_entity) | int(0) != 0 }}"
-                sequence:
-                  - action: number.set_value
-                    target:
-                      entity_id: !input remote_timeout_set
-                    data:
-                      value: 0
-          - event: custom_log
-            event_data:
-              level: debug
-              channel: solakon
-              message: "Disabled mode: hardware reset to defaults"
-          - stop: "Disabled mode active"
+            value_template: "{{ states(rc_mode_entity) != rc_mode_off }}"
+        then:
+          - action: select.select_option
+            target:
+              entity_id: !input remote_control_mode
+            data:
+              option: "{{ rc_mode_off }}"
+      - if:
+          - condition: template
+            value_template: "{{ states(active_power_entity) | int(0) != 0 }}"
+        then:
+          - action: number.set_value
+            target:
+              entity_id: !input remote_active_power
+            data:
+              value: 0
+      - if:
+          - condition: template
+            value_template: "{{ states(discharge_entity) | float(0) != max_discharge }}"
+        then:
+          - action: number.set_value
+            target:
+              entity_id: !input discharge_current_entity
+            data:
+              value: "{{ max_discharge }}"
+      - if:
+          - condition: template
+            value_template: "{{ states(timeout_set_entity) | int(0) != 0 }}"
+        then:
+          - action: number.set_value
+            target:
+              entity_id: !input remote_timeout_set
+            data:
+              value: 0
+      - event: custom_log
+        event_data:
+          level: debug
+          channel: solakon
+          message: "Disabled mode: hardware reset to defaults"
+      - stop: "Disabled mode active"
 
   # ---- Mode Transitions ----
 
-  - choose:
-      # active CHARGE mode with grid energy if SOC is below the minimum
-      - conditions:
-          - condition: template
-            value_template: >
-              {{ current_soc < min_soc
-                 and states(charge_mode_entity) != 'safety_charge' }}
-        sequence:
-          - action: input_select.select_option
-            target:
-              entity_id: !input charge_mode_select
-            data:
-              option: safety_charge
-          - event: custom_log
-            event_data:
-              level: debug
-              channel: solakon
-              message: "SOC < {{ min_soc }}% -> (Grid) charge mode enabled"
+  # active CHARGE mode with grid energy if SOC is below the minimum
+  - if:
+      - condition: template
+        value_template: >
+          {{ current_soc < min_soc
+             and states(charge_mode_entity) != 'safety_charge' }}
+    then:
+      - action: input_select.select_option
+        target:
+          entity_id: !input charge_mode_select
+        data:
+          option: safety_charge
+      - event: custom_log
+        event_data:
+          level: debug
+          channel: solakon
+          message: "SOC < {{ min_soc }}% -> (Grid) charge mode enabled"
 
-  - choose:
-      # use PV to charge the battery without exporting to the home grid
-      - conditions:
-          - condition: template
-            value_template: >
-              {{ current_soc >= min_soc
-                 and current_soc < min_soc_feed
-                 and states(charge_mode_entity) != 'pv_protect'
-                 and (states(charge_mode_entity) != 'safety_charge'
-                      or current_soc >= min_soc + 5) }}
-        sequence:
-          - action: input_select.select_option
-            target:
-              entity_id: !input charge_mode_select
-            data:
-              option: pv_protect
-          - event: custom_log
-            event_data:
-              level: debug
-              channel: solakon
-              message: "SOC between {{ min_soc }}% and {{ min_soc_feed }}% -> PV protect mode enabled"
+  # use PV to charge the battery without exporting to the home grid
+  - if:
+      - condition: template
+        value_template: >
+          {{ current_soc >= min_soc
+             and current_soc < min_soc_feed
+             and states(charge_mode_entity) != 'pv_protect'
+             and (states(charge_mode_entity) != 'safety_charge'
+                  or current_soc >= min_soc + 5) }}
+    then:
+      - action: input_select.select_option
+        target:
+          entity_id: !input charge_mode_select
+        data:
+          option: pv_protect
+      - event: custom_log
+        event_data:
+          level: debug
+          channel: solakon
+          message: "SOC between {{ min_soc }}% and {{ min_soc_feed }}% -> PV protect mode enabled"
 
   - choose:
       # auto-enable power_boost at high SOC
@@ -388,227 +383,229 @@ actions:
               channel: solakon
               message: "SOC > {{ min_soc_feed }}% -> ECO feed mode enabled"
 
-  - choose:
-      # disabling Power Boost
-      - conditions:
-          - condition: template
-            value_template: >
-              {{ current_soc <= min_soc_feed
-                 and states(charge_mode_entity) == 'power_boost' }}
-        sequence:
-          - action: input_select.select_option
-            target:
-              entity_id: !input charge_mode_select
-            data:
-              option: eco_feed
-          - event: custom_log
-            event_data:
-              level: debug
-              channel: solakon
-              message: "SOC <= {{ min_soc_feed }}% -> Power Boost mode disabled"
+  # disabling Power Boost
+  - if:
+      - condition: template
+        value_template: >
+          {{ current_soc <= min_soc_feed
+             and states(charge_mode_entity) == 'power_boost' }}
+    then:
+      - action: input_select.select_option
+        target:
+          entity_id: !input charge_mode_select
+        data:
+          option: eco_feed
+      - event: custom_log
+        event_data:
+          level: debug
+          channel: solakon
+          message: "SOC <= {{ min_soc_feed }}% -> Power Boost mode disabled"
 
   # ---- Remote Timeout ----
 
-  - choose:
-      # set a remote timer if necessary
-      - conditions:
+  # set a remote timer if necessary
+  - if:
+      - condition: template
+        value_template: "{{ current_timeout < (max_remote_timeout / 2) }}"
+    then:
+      - action: number.set_value
+        target:
+          entity_id: !input remote_timeout_set
+        data:
+          value: "{{ max_remote_timeout }}"
+      - event: custom_log
+        event_data:
+          level: debug
+          channel: solakon
+          message: "set timeout -> {{ max_remote_timeout }}"
+
+  # ---- Hardware Configuration ----
+
+  # configure for safety_charge mode
+  - if:
+      - condition: template
+        value_template: "{{ states(charge_mode_entity) == 'safety_charge' }}"
+    then:
+      # ensure PV-priority charge mode (set only if necessary)
+      - if:
           - condition: template
-            value_template: "{{ current_timeout < (max_remote_timeout / 2) }}"
-        sequence:
+            value_template: "{{ states(rc_mode_entity) != rc_mode_charge }}"
+        then:
+          - action: select.select_option
+            target:
+              entity_id: !input remote_control_mode
+            data:
+              option: "{{ rc_mode_charge }}"
+
+      # ensure no discharge (set only if necessary)
+      - if:
+          - condition: template
+            value_template: "{{ states(discharge_entity) | float(0) != 0 }}"
+        then:
           - action: number.set_value
             target:
-              entity_id: !input remote_timeout_set
+              entity_id: !input discharge_current_entity
             data:
-              value: "{{ max_remote_timeout }}"
+              value: 0
+
+      # decide grid usage based on PV power
+      - choose:
+          # PV sufficient -> no grid power
+          - conditions:
+              - condition: template
+                value_template: "{{ current_pv > inverter_self_consumption }}"
+            sequence:
+              - condition: template
+                value_template: "{{ states(active_power_entity) | int(0) != 0 }}"
+              - action: number.set_value
+                target:
+                  entity_id: !input remote_active_power
+                data:
+                  value: 0
+              - event: custom_log
+                event_data:
+                  level: debug
+                  channel: solakon
+                  message: "safety_charge: PV {{ current_pv }} W -> grid 0 W"
+
+          # PV not sufficient -> use grid assist
+          - conditions:
+              - condition: template
+                value_template: "{{ current_pv <= inverter_self_consumption }}"
+            sequence:
+              - condition: template
+                value_template: "{{ states(active_power_entity) | int(0) != max_grid_charge }}"
+              - action: number.set_value
+                target:
+                  entity_id: !input remote_active_power
+                data:
+                  value: "{{ max_grid_charge }}"
+              - event: custom_log
+                event_data:
+                  level: debug
+                  channel: solakon
+                  message: "safety_charge: PV {{ current_pv }} W -> grid {{ max_grid_charge }} W"
+
+  # configure for pv_protect mode
+  - if:
+      - condition: template
+        value_template: "{{ states(charge_mode_entity) == 'pv_protect' }}"
+    then:
+      # ensure PV-priority charge mode (set only if necessary)
+      - if:
+          - condition: template
+            value_template: "{{ states(rc_mode_entity) != rc_mode_charge }}"
+        then:
+          - action: select.select_option
+            target:
+              entity_id: !input remote_control_mode
+            data:
+              option: "{{ rc_mode_charge }}"
+
+      # ensure no discharge (set only if necessary)
+      - if:
+          - condition: template
+            value_template: "{{ states(discharge_entity) | float(0) != 0 }}"
+        then:
+          - action: number.set_value
+            target:
+              entity_id: !input discharge_current_entity
+            data:
+              value: 0
+
+      # ensure no grid usage (set only if necessary)
+      - if:
+          - condition: template
+            value_template: "{{ states(active_power_entity) | int(0) != 0 }}"
+        then:
+          - action: number.set_value
+            target:
+              entity_id: !input remote_active_power
+            data:
+              value: 0
           - event: custom_log
             event_data:
               level: debug
               channel: solakon
-              message: "set timeout -> {{ max_remote_timeout }}"
+              message: "pv_protect: PV {{ current_pv }} W -> grid 0 W"
 
-  # ---- Hardware Configuration ----
-
-  - choose:
-      # configure for safety_charge mode
-      - conditions:
+  # configure for eco_feed and power_boost mode
+  - if:
+      - condition: template
+        value_template: "{{ states(charge_mode_entity) in ['eco_feed', 'power_boost'] }}"
+    then:
+      - variables:
+          charge_mode: "{{ states(charge_mode_entity) }}"
+          # Overflow hysteresis: enter hard at SOC >= 98, exit once SOC drops below 95. Between
+          # those, the current active_power is the state anchor: we stay in overflow only while
+          # we are still feeding significantly above pure household demand (the +inverter_
+          # self_consumption offset distinguishes real PV overshoot from demand-following).
+          # Note: current_soc goes through `| int(0)`, so thresholds effectively round down.
+          is_overflow: >
+            {{ current_soc >= 98
+               or (current_soc > 95
+                   and states(active_power_entity) | int(0)
+                       > (current_demand - min_net_power) + inverter_self_consumption) }}
+          discharge_current: >
+            {% if charge_mode == 'power_boost' %}
+              {{ max_discharge }}
+            {% else %}
+              0
+            {% endif %}
+          effective_max: >
+            {{ max_active_power
+               if states(eps_power_sensor) | int(0) > max_house_feed
+               else max_house_feed }}
+          # In overflow mode, PV minus inverter self-consumption sets the floor so the inverter
+          # covers its own draw from PV instead of draining the battery. The battery is still
+          # available as a short-term buffer (discharge stays at 40A for power_boost), which
+          # keeps the inverter from throttling PV production when SOC is near full.
+          new_active_power: >
+            {% if is_overflow %}
+              {{ min(effective_max,
+                     max(current_pv - inverter_self_consumption,
+                         current_demand - min_net_power, 0)) }}
+            {% else %}
+              {{ min(effective_max, max(0, current_demand - min_net_power)) }}
+            {% endif %}
+      # ensure PV-priority charge mode (set only if necessary)
+      - if:
           - condition: template
-            value_template: "{{ states(charge_mode_entity) == 'safety_charge' }}"
-        sequence:
-          # ensure PV-priority charge mode (set only if necessary)
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: "{{ states(rc_mode_entity) != rc_mode_charge }}"
-                sequence:
-                  - action: select.select_option
-                    target:
-                      entity_id: !input remote_control_mode
-                    data:
-                      option: "{{ rc_mode_charge }}"
+            value_template: "{{ states(rc_mode_entity) != rc_mode_feed }}"
+        then:
+          - action: select.select_option
+            target:
+              entity_id: !input remote_control_mode
+            data:
+              option: "{{ rc_mode_feed }}"
 
-          # ensure no discharge (set only if necessary)
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: "{{ states(discharge_entity) | float(0) != 0 }}"
-                sequence:
-                  - action: number.set_value
-                    target:
-                      entity_id: !input discharge_current_entity
-                    data:
-                      value: 0
-
-          # decide grid usage based on PV power
-          - choose:
-              # PV sufficient -> no grid power
-              - conditions:
-                  - condition: template
-                    value_template: "{{ current_pv > min_pv_charge_power }}"
-                sequence:
-                  - condition: template
-                    value_template: "{{ states(active_power_entity) | int(0) != 0 }}"
-                  - action: number.set_value
-                    target:
-                      entity_id: !input remote_active_power
-                    data:
-                      value: 0
-                  - event: custom_log
-                    event_data:
-                      level: debug
-                      channel: solakon
-                      message: "safety_charge: PV {{ current_pv }} W -> grid 0 W"
-
-              # PV not sufficient -> use grid assist
-              - conditions:
-                  - condition: template
-                    value_template: "{{ current_pv <= min_pv_charge_power }}"
-                sequence:
-                  - condition: template
-                    value_template: "{{ states(active_power_entity) | int(0) != max_grid_charge }}"
-                  - action: number.set_value
-                    target:
-                      entity_id: !input remote_active_power
-                    data:
-                      value: "{{ max_grid_charge }}"
-                  - event: custom_log
-                    event_data:
-                      level: debug
-                      channel: solakon
-                      message: "safety_charge: PV {{ current_pv }} W -> grid {{ max_grid_charge }} W"
-
-  - choose:
-      # configure for pv_protect mode
-      - conditions:
+      # ensure max discharge (set only if necessary)
+      - if:
           - condition: template
-            value_template: "{{ states(charge_mode_entity) == 'pv_protect' }}"
-        sequence:
-          # ensure PV-priority charge mode (set only if necessary)
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: "{{ states(rc_mode_entity) != rc_mode_charge }}"
-                sequence:
-                  - action: select.select_option
-                    target:
-                      entity_id: !input remote_control_mode
-                    data:
-                      option: "{{ rc_mode_charge }}"
+            value_template: "{{ states(discharge_entity) | float(0) != discharge_current }}"
+        then:
+          - action: number.set_value
+            target:
+              entity_id: !input discharge_current_entity
+            data:
+              value: "{{ discharge_current }}"
 
-          # ensure no discharge (set only if necessary)
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: "{{ states(discharge_entity) | float(0) != 0 }}"
-                sequence:
-                  - action: number.set_value
-                    target:
-                      entity_id: !input discharge_current_entity
-                    data:
-                      value: 0
-
-          # ensure no grid usage (set only if necessary)
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: "{{ states(active_power_entity) | int(0) != 0 }}"
-                sequence:
-                  - action: number.set_value
-                    target:
-                      entity_id: !input remote_active_power
-                    data:
-                      value: 0
-                  - event: custom_log
-                    event_data:
-                      level: debug
-                      channel: solakon
-                      message: "pv_protect: PV {{ current_pv }} W -> grid 0 W"
-
-  - choose:
-      # configure for eco_feed and power_boost mode
-      - conditions:
+      - if:
           - condition: template
-            value_template: "{{ states(charge_mode_entity) in ['eco_feed', 'power_boost'] }}"
-        sequence:
-          - variables:
-              charge_mode: "{{ states(charge_mode_entity) }}"
-              is_overflow: "{{ current_soc >= 98 }}"
-              discharge_current: >
-                {% if charge_mode == 'power_boost' %}
-                  {{ max_discharge }}
-                {% else %}
-                  0
-                {% endif %}
-              effective_max: >
-                {{ max_active_power
-                   if states(eps_power_sensor) | int(0) > max_house_feed
-                   else max_house_feed }}
-              new_active_power: >
+            value_template: "{{ states(active_power_entity) | int(0) != new_active_power }}"
+        then:
+          - action: number.set_value
+            target:
+              entity_id: !input remote_active_power
+            data:
+              value: "{{ new_active_power }}"
+          - event: custom_log
+            event_data:
+              level: debug
+              channel: solakon
+              message: >
                 {% if is_overflow %}
-                  {{ min(effective_max, max(current_pv, current_demand - min_net_power, 0)) }}
+                  {{ charge_mode }}: overflow (SOC {{ current_soc }}%) -> feed {{ new_active_power }} W
                 {% else %}
-                  {{ min(effective_max, max(0, current_demand - min_net_power)) }}
+                  {{ charge_mode }}: demand {{ current_demand }} W -> remote_active_power {{ new_active_power }} W
                 {% endif %}
-          # ensure PV-priority charge mode (set only if necessary)
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: "{{ states(rc_mode_entity) != rc_mode_feed }}"
-                sequence:
-                  - action: select.select_option
-                    target:
-                      entity_id: !input remote_control_mode
-                    data:
-                      option: "{{ rc_mode_feed }}"
-
-          # ensure max discharge (set only if necessary)
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: "{{ states(discharge_entity) | float(0) != discharge_current }}"
-                sequence:
-                  - action: number.set_value
-                    target:
-                      entity_id: !input discharge_current_entity
-                    data:
-                      value: "{{ discharge_current }}"
-
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: "{{ states(active_power_entity) | int(0) != new_active_power }}"
-                sequence:
-                  - action: number.set_value
-                    target:
-                      entity_id: !input remote_active_power
-                    data:
-                      value: "{{ new_active_power }}"
-                  - event: custom_log
-                    event_data:
-                      level: debug
-                      channel: solakon
-                      message: >
-                        {% if is_overflow %}
-                          {{ charge_mode }}: overflow (SOC {{ current_soc }}%) -> feed {{ new_active_power }} W
-                        {% else %}
-                          {{ charge_mode }}: demand {{ current_demand }} W -> remote_active_power {{ new_active_power }} W
-                        {% endif %}

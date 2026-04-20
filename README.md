@@ -1,4 +1,4 @@
-# Solakon One Charge Controller [v005]
+# Solakon One Charge Controller [v006]
 
 Home Assistant blueprint for automated charge control of the Solakon One balcony power station with battery storage.
 
@@ -7,7 +7,7 @@ Home Assistant blueprint for automated charge control of the Solakon One balcony
 - Five charge modes with automatic SOC-based transitions
 - Demand-based PV feed-in with dynamic power limit
 - Modbus-safe queued execution (no overlapping writes)
-- All hardware values use "set only if changed" guards to minimise API calls
+- All hardware values use "set only if changed" guards to minimize API calls
 
 ## Charge Modes
 
@@ -31,7 +31,7 @@ This works automatically in both eco_feed and power_boost modes and requires no 
 
 ## Prerequisites
 
-Before importing this blueprint you need to create two helpers manually:
+Before importing this blueprint, you need to create two helpers manually:
 
 ### 1. Input Select (Charge Mode)
 
