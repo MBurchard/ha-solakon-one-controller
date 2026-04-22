@@ -1,4 +1,4 @@
-# Solakon One Charge Controller [v007]
+# Solakon One Charge Controller [v008]
 
 Home Assistant blueprint for automated charge control of the Solakon One balcony power station with battery storage.
 
@@ -19,15 +19,27 @@ Home Assistant blueprint for automated charge control of the Solakon One balcony
 | eco_feed      | SOC > 20%                                 | PV feed-in to house, demand-based, no discharge          |
 | power_boost   | SOC > 70% (auto) or manual from >= 20%    | Like eco_feed with battery discharge                     |
 
-## Solar Overflow Protection
+## Solar Overflow Regulator
 
-When the battery is nearly full (SOC >= 98%), the sun keeps shining and PV production is available at no cost.
-Rather than letting this energy go unused, the controller automatically switches to overflow mode: battery discharge
-is set to 0 A, and feed-in power is set to the maximum house feed limit (default 800 W), keeping PV production active
-and feeding it into the house grid.
+At and above the overflow SOC threshold (default 98%) a direct regulator takes over `active_power`. The Solakon
+One never reports its real PV potential when the battery is near full (the MPPT curtails internally), so the
+regulator uses the battery charge and discharge sensors as feedback:
 
-Overflow mode stays active until SOC drops to 95% or below, providing a 3% hysteresis buffer to prevent oscillation.
-This works automatically in both eco_feed and power_boost modes and requires no configuration.
+- **Charge > 0, discharge == 0:** PV produces more than we feed in, the surplus charges the battery. Add exactly
+  that surplus to `active_power`.
+- **Discharge > 0, charge == 0:** PV cannot cover the feed-in, battery closes the gap. Subtract exactly that
+  amount from `active_power`.
+- **Both zero:** battery idle but PV might still have headroom (typical at 100 % SOC where the battery cannot
+  accept charge). Probe upwards by `power_step` (default 25 W). Oscillation around the ceiling is bounded by the
+  write throttle.
+- **Both non-zero** (rare quantisation edge): hold.
+
+Writes on `active_power` inside the overflow zone are throttled to once per `overflow_throttle` seconds (default
+5 s). The Solakon One briefly drains the battery when active_power rises before its PV ramps up, so reacting too
+fast bounces. Outside the overflow zone (SOC < overflow threshold), the normal demand-based feed-in applies
+without throttle. `active_power` is clamped between `demand - min_net_power` (the house stays covered, discharge
+there is expected power_boost behaviour) and `max_house_feed` (legal limit). RC mode stays on 1 (inverter export)
+throughout, discharge current stays mode-specific. Works in both eco_feed and power_boost.
 
 ## Prerequisites
 
@@ -79,15 +91,18 @@ you through entity selection.
 
 ### Key Parameters
 
-| Parameter             | Default | Description                                           |
-|-----------------------|---------|-------------------------------------------------------|
-| Max Active Power      | 1200 W  | Maximum feed-in power with EPS load (external socket) |
-| Max House Feed        | 800 W   | Maximum house grid feed-in power (German legal limit) |
-| Max Grid Charge       | 600 W   | Maximum power when charging from grid                 |
-| Min SOC               | 10%     | Below this SOC, grid charging starts                  |
-| Min SOC Feed          | 20%     | Below this SOC, battery is protected (no feed-in)     |
-| Min SOC Power Boost   | 70%     | SOC threshold for automatic power boost               |
-| Max Discharge Current | 40 A    | Battery discharge current in power boost mode         |
+| Parameter              | Default | Description                                           |
+|------------------------|---------|-------------------------------------------------------|
+| Max Active Power       | 1200 W  | Maximum feed-in power with EPS load (external socket) |
+| Max House Feed         | 800 W   | Maximum house grid feed-in power (German legal limit) |
+| Max Grid Charge        | 600 W   | Maximum power when charging from grid                 |
+| Min SOC                | 10%     | Below this SOC, grid charging starts                  |
+| Min SOC Feed           | 20%     | Below this SOC, battery is protected (no feed-in)     |
+| Min SOC Power Boost    | 70%     | SOC threshold for automatic power boost               |
+| Max Discharge Current  | 40 A    | Battery discharge current in power boost mode         |
+| Overflow SOC Threshold | 98%     | SOC at and above which the overflow regulator runs    |
+| Overflow Write Throttle| 5 s     | Minimum seconds between active_power writes in overflow |
+| Regulator Probe Step   | 25 W    | Step size when both charge and discharge are zero     |
 
 ### Remote Control Mode Values
 

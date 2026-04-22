@@ -1,12 +1,13 @@
 #file: noinspection YAMLSchemaValidation
 blueprint:
-  name: Solakon One Charge Controller [v007]
+  name: Solakon One Charge Controller [v008]
   source_url: https://github.com/MBurchard/ha-solakon-one-controller/blob/main/blueprints/solakon_one.yaml
   description: >
     Automated charge controller for Solakon One balcony power station with battery storage. Manages five charge modes
     (disabled, safety_charge, pv_protect, eco_feed, power_boost) based on battery SOC, PV production, and household
-    energy demand. Includes solar overflow protection: when the battery is full, the controller keeps harvesting
-    available solar energy and feeds it into the grid instead of letting free PV production go unused.
+    energy demand. At and above the overflow SOC threshold, a direct regulator adjusts active_power by the current
+    battery charge or discharge reading. A short write-throttle (default 5 s) gives the Solakon One's slow internal
+    regulation time to settle before the next adjustment.
 
 
     Prerequisites (must be created manually before using this blueprint):
@@ -51,6 +52,24 @@ blueprint:
       name: EPS Power Sensor
       description: Solakon One EPS power sensor for external socket (W)
       default: sensor.solakon_one_eps_power
+      selector:
+        entity:
+          domain: sensor
+    battery_discharge_sensor:
+      name: Battery Discharge Sensor
+      description: >
+        Solakon One battery discharge sensor (W). Used as feedback for the overflow regulator: if the battery is
+        currently discharging, active_power is too high for the available PV.
+      default: sensor.solakon_one_entladung
+      selector:
+        entity:
+          domain: sensor
+    battery_charge_sensor:
+      name: Battery Charge Sensor
+      description: >
+        Solakon One battery charge sensor (W). Used as feedback for the overflow regulator: if the battery is
+        currently charging, PV has headroom that we can claim by raising active_power.
+      default: sensor.solakon_one_ladung
       selector:
         entity:
           domain: sensor
@@ -104,14 +123,6 @@ blueprint:
       name: RC Mode Feed
       description: Remote control mode value for inverter export (eco_feed/power_boost)
       default: "1"
-      selector:
-        text:
-    rc_mode_grid_export:
-      name: RC Mode Grid Export
-      description: >
-        Remote control mode used in overflow (battery near full). Value 5 means "grid export" and bypasses the PV
-        curtailment that the inverter triggers in PV-priority export modes when the battery is near full.
-      default: "5"
       selector:
         text:
     rc_mode_charge:
@@ -213,6 +224,41 @@ blueprint:
           min: 0
           max: 100
           unit_of_measurement: A
+    overflow_soc:
+      name: Overflow SOC Threshold (%)
+      description: >
+        At and above this SOC the overflow regulator takes over active_power. Below, normal demand-based feed-in
+        applies. No hysteresis: hard cut when SOC drops below this value.
+      default: 98
+      selector:
+        number:
+          min: 80
+          max: 100
+          unit_of_measurement: "%"
+    overflow_throttle:
+      name: Overflow Write Throttle (s)
+      description: >
+        Minimum seconds between two active_power writes while in the overflow regulator. The Solakon One reacts
+        slowly to active_power changes (it briefly drains the battery before the PV catches up), so reacting too
+        fast would bounce. This throttle applies only inside the overflow zone; outside, writes are immediate.
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 60
+          unit_of_measurement: s
+    power_step:
+      name: Regulator Probe Step (W)
+      description: >
+        Step size used in the overflow regulator when both charge and discharge are zero. Happens e.g. at 100 % SOC
+        (battery cannot accept charge) or after the regulator has converged. Probing upwards by this amount keeps
+        claiming PV headroom; if we overshoot, the discharge branch corrects on the next tick (throttled).
+      default: 25
+      selector:
+        number:
+          min: 5
+          max: 200
+          unit_of_measurement: W
 
 mode: queued
 max: 5
@@ -224,6 +270,8 @@ trigger_variables:
   soc_sensor: !input soc_sensor
   pv_power_sensor: !input pv_power_sensor
   eps_power_sensor: !input eps_power_sensor
+  battery_discharge_sensor: !input battery_discharge_sensor
+  battery_charge_sensor: !input battery_charge_sensor
   charge_mode_entity: !input charge_mode_select
   rc_mode_entity: !input remote_control_mode
   active_power_entity: !input remote_active_power
@@ -232,7 +280,6 @@ trigger_variables:
   # remote control mode values
   rc_mode_off: !input rc_mode_off
   rc_mode_feed: !input rc_mode_feed
-  rc_mode_grid_export: !input rc_mode_grid_export
   rc_mode_charge: !input rc_mode_charge
   # numeric settings
   max_active_power: !input max_active_power
@@ -245,12 +292,19 @@ trigger_variables:
   min_soc_feed: !input min_soc_feed
   min_soc_power_boost: !input min_soc_power_boost
   max_discharge: !input max_discharge
+  overflow_soc: !input overflow_soc
+  overflow_throttle: !input overflow_throttle
+  power_step: !input power_step
 
 triggers:
   - trigger: state
     entity_id: !input demand_sensor
   - trigger: state
     entity_id: !input soc_sensor
+  - trigger: state
+    entity_id: !input battery_discharge_sensor
+  - trigger: state
+    entity_id: !input battery_charge_sensor
   - trigger: time_pattern
     seconds: "/30"
 
@@ -259,6 +313,8 @@ variables:
   current_pv: "{{ states(pv_power_sensor) | int(0) }}"
   current_soc: "{{ states(soc_sensor) | int(0) }}"
   current_timeout: "{{ states(timeout_sensor) | int(0) }}"
+  current_discharge: "{{ states(battery_discharge_sensor) | float(0) }}"
+  current_charge: "{{ states(battery_charge_sensor) | float(0) }}"
 
 actions:
   # abort if SOC is not available (unknown / unavailable / none)
@@ -544,55 +600,43 @@ actions:
     then:
       - variables:
           charge_mode: "{{ states(charge_mode_entity) }}"
-          # Overflow only makes sense while PV actually exceeds household demand (plus inverter self-consumption).
-          # If PV drops below that, the battery must supply the household, so discharge has to be enabled, and we fall
-          # back to normal demand-based feed-in.
-          # SOC part: hysteresis with hard enter at SOC >= 98, stay while SOC >= 96.
-          # Hold branch uses active_power as a state anchor (only the overflow branch sets it to max_house_feed).
-          # Note: current_soc is int-floored.
-          is_overflow: >
-            {{ (current_soc >= 98
-                or (current_soc >= 96 and current_soc < 98
-                    and states(active_power_entity) | int(0) >= max_house_feed))
-               and current_pv > (current_demand - min_net_power + inverter_self_consumption) }}
-          # In overflow, lock discharge to 0 so the battery cannot drain and switch the RC mode to grid export so the
-          # inverter does not curtail PV when the battery is near full.
-          # Outside overflow, keep the normal power_boost/eco_feed behaviour.
-          discharge_current: >
-            {% if is_overflow %}
-              0
-            {% elif charge_mode == 'power_boost' %}
-              {{ max_discharge }}
-            {% else %}
-              0
-            {% endif %}
-          target_rc_mode: >
-            {{ rc_mode_grid_export if is_overflow else rc_mode_feed }}
+          discharge_current: "{{ max_discharge if charge_mode == 'power_boost' else 0 }}"
+          in_overflow_zone: "{{ current_soc >= overflow_soc }}"
+          current_active_power: "{{ states(active_power_entity) | int(0) }}"
           effective_max: >
             {{ max_active_power
                if states(eps_power_sensor) | int(0) > max_house_feed
                else max_house_feed }}
-          # In the overflow feed a fixed max_house_feed (legal limit). With discharge=0 and the grid-export RC mode,
-          # the inverter will supply as much as PV currently allows and not throttle.
-          # Outside overflow, stick to demand-based feed-in as before.
+          demand_feed: "{{ min(effective_max, max(0, current_demand - min_net_power)) }}"
           new_active_power: >
-            {% if is_overflow %}
-              {{ max_house_feed }}
+            {% if in_overflow_zone %}
+              {% if current_charge > 0 and current_discharge == 0 %}
+                {% set target = current_active_power + current_charge | int(0) %}
+              {% elif current_discharge > 0 and current_charge == 0 %}
+                {% set target = current_active_power - current_discharge | int(0) %}
+              {% elif current_charge == 0 and current_discharge == 0 %}
+                {% set target = current_active_power + power_step %}
+              {% else %}
+                {% set target = current_active_power %}
+              {% endif %}
+              {{ [demand_feed, [effective_max, target] | min] | max }}
             {% else %}
-              {{ min(effective_max, max(0, current_demand - min_net_power)) }}
+              {{ demand_feed }}
             {% endif %}
-      # ensure correct RC mode (grid_export in overflow, feed otherwise)
+          seconds_since_last_ap_write: >
+            {{ (now() - states[active_power_entity].last_changed).total_seconds() }}
+          overflow_throttle_blocks: >
+            {{ in_overflow_zone and seconds_since_last_ap_write < overflow_throttle }}
       - if:
           - condition: template
-            value_template: "{{ states(rc_mode_entity) != target_rc_mode }}"
+            value_template: "{{ states(rc_mode_entity) != rc_mode_feed }}"
         then:
           - action: select.select_option
             target:
               entity_id: !input remote_control_mode
             data:
-              option: "{{ target_rc_mode }}"
+              option: "{{ rc_mode_feed }}"
 
-      # ensure discharge current matches target (set only if necessary)
       - if:
           - condition: template
             value_template: "{{ states(discharge_entity) | float(0) != discharge_current }}"
@@ -605,7 +649,8 @@ actions:
 
       - if:
           - condition: template
-            value_template: "{{ states(active_power_entity) | int(0) != new_active_power }}"
+            value_template: >
+              {{ current_active_power != new_active_power and not overflow_throttle_blocks }}
         then:
           - action: number.set_value
             target:
@@ -617,8 +662,9 @@ actions:
               level: debug
               channel: solakon
               message: >
-                {% if is_overflow %}
-                  {{ charge_mode }}: overflow (SOC {{ current_soc }}%) -> feed {{ new_active_power }} W
+                {% if in_overflow_zone %}
+                  {{ charge_mode }}: overflow (SOC {{ current_soc }}%, charge {{ current_charge }} W,
+                  discharge {{ current_discharge }} W) -> feed {{ new_active_power }} W
                 {% else %}
                   {{ charge_mode }}: demand {{ current_demand }} W -> remote_active_power {{ new_active_power }} W
                 {% endif %}
